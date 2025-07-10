@@ -7,7 +7,6 @@ on:
       - 'lambda/**'
       - '.github/workflows/deploy.yml'
 
-
 jobs:
   deploy:
     runs-on: ubuntu-latest
@@ -28,24 +27,7 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
 
-      - name: Check Changed Paths
-        id: changes
-        run: |
-          echo "## Detecting changes..."
-          git fetch origin main
-          if [ "${{ github.event.before }}" = "0000000000000000000000000000000000000000" ]; then
-            # First commit or new branch: compare against empty tree
-            CHANGED=$(git diff --name-only ${{ github.sha }})
-          else
-            CHANGED=$(git diff --name-only ${{ github.event.before }} ${{ github.sha }})
-          fi
-          echo "CHANGED FILES:"
-          echo "$CHANGED"
-          echo "$CHANGED" | grep -q "^lambda/write_streams/" && echo "ingest_lambda_changed=true" >> $GITHUB_OUTPUT
-
-
-      - name: Deploy ingest_lambda (if changed)
-        if: steps.changes.outputs.ingest_lambda_changed == 'true'
+      - name: Deploy ingest_lambda
         run: |
           cd lambda/write_streams
           cp handler.py package/
@@ -53,5 +35,3 @@ jobs:
           aws lambda update-function-code \
             --function-name write_streams \
             --zip-file fileb://../write_streams.zip
-
- 
