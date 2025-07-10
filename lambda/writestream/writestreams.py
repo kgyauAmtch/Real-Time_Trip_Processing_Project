@@ -1,6 +1,7 @@
 import json
 import boto3
 import logging
+import base64
 from botocore.exceptions import ClientError
 from datetime import datetime
 
@@ -61,9 +62,11 @@ def parse_iso8601(dt_str):
     except Exception:
         raise ValueError(f"Invalid datetime format: {dt_str}")
 
-def lambda_handler(event, context):
-    logger.info(f"Received event: {json.dumps(event)}")  # Log the incoming event
-
+def process_trip_event(event):
+    """
+    Process a single trip event (dict), validate and update DynamoDB.
+    Returns a dict with status and message.
+    """
     try:
         if 'dropoff_datetime' in event:
             logger.info("Processing trip start event")
@@ -122,38 +125,55 @@ def lambda_handler(event, context):
             ReturnValues="ALL_NEW"
         )
 
-        logger.info(f"DynamoDB update successful. Updated attributes: {response.get('Attributes', {})}")
+        logger.info(f"DynamoDB update successful for trip_id {trip_id}. Updated attributes: {response.get('Attributes', {})}")
 
-        return {
-            'statusCode': 200,
-            'body': json.dumps({
-                'message': 'Trip record updated',
-                'updatedAttributes': response.get('Attributes', {})
-            })
-        }
+        return {'trip_id': trip_id, 'status': 'updated', 'attributes': response.get('Attributes', {})}
 
     except ClientError as e:
         if e.response['Error']['Code'] == 'ConditionalCheckFailedException':
-            logger.warning("Stale update ignored due to conditional check failure.")
-            return {
-                'statusCode': 200,
-                'body': json.dumps({'message': 'Stale update ignored'})
-            }
+            logger.warning(f"Stale update ignored for trip_id {event.get('trip_id')}")
+            return {'trip_id': event.get('trip_id'), 'status': 'stale_update_ignored'}
         else:
-            logger.error(f"DynamoDB ClientError: {str(e)}")
-            return {
-                'statusCode': 500,
-                'body': json.dumps({'error': str(e)})
-            }
+            logger.error(f"DynamoDB ClientError for trip_id {event.get('trip_id')}: {str(e)}")
+            raise
     except ValueError as ve:
-        logger.error(f"Validation error: {str(ve)}")
-        return {
-            'statusCode': 400,
-            'body': json.dumps({'error': str(ve)})
-        }
+        logger.error(f"Validation error for trip_id {event.get('trip_id')}: {str(ve)}")
+        raise
     except Exception as ex:
-        logger.error(f"Unexpected error: {str(ex)}")
-        return {
-            'statusCode': 500,
-            'body': json.dumps({'error': str(ex)})
-        }
+        logger.error(f"Unexpected error for trip_id {event.get('trip_id')}: {str(ex)}")
+        raise
+
+def lambda_handler(event, context):
+    logger.info(f"Received Kinesis event with {len(event.get('Records', []))} records")
+
+    results = []
+    errors = []
+
+    for record in event.get('Records', []):
+        try:
+            # Decode base64 data from Kinesis
+            payload = base64.b64decode(record['kinesis']['data']).decode('utf-8')
+            logger.info(f"Decoded payload: {payload}")
+
+            # Parse JSON payload
+            data = json.loads(payload)
+
+            # Process each trip event
+            result = process_trip_event(data)
+            results.append(result)
+        except Exception as e:
+            logger.error(f"Error processing record: {str(e)}")
+            errors.append({'error': str(e), 'record': record})
+
+    response_body = {
+        'processed_records': len(results),
+        'errors': errors,
+        'results': results
+    }
+
+    status_code = 200 if not errors else 500
+
+    return {
+        'statusCode': status_code,
+        'body': json.dumps(response_body)
+    }
