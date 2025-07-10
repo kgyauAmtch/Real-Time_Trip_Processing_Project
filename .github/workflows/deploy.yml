@@ -29,9 +29,9 @@ jobs:
 
       - name: Deploy ingest_lambda
         run: |
-          cd lambda/write_streams
+          cd lambda/writestream
           cp handler.py package/
-          cd package && zip -r ../write_streams.zip .
+          cd package && zip -r ../writestream.zip .
           aws lambda update-function-code \
-            --function-name write_streams \
-            --zip-file fileb://../write_streams.zip
+            --function-name writestream \
+            --zip-file fileb://../writestream.zip
