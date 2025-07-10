@@ -3,12 +3,11 @@ import boto3
 import logging
 from decimal import Decimal
 
-# Set up logging
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
 dynamodb = boto3.resource('dynamodb')
-kpi_table = dynamodb.Table('TripDailyKPIs')  # Table for daily KPI aggregates
+kpi_table = dynamodb.Table('TripDailyKPIs')
 
 def lambda_handler(event, context):
     logger.info(f"Received {len(event.get('Records', []))} DynamoDB stream records")
@@ -17,39 +16,33 @@ def lambda_handler(event, context):
         event_name = record.get('eventName')
         logger.info(f"Processing record with eventName: {event_name}")
 
-        # Process only INSERT or MODIFY events
         if event_name not in ['INSERT', 'MODIFY']:
-            logger.info("Skipping record as eventName is not INSERT or MODIFY")
             continue
 
         new_image = record['dynamodb'].get('NewImage', {})
-        old_image = record['dynamodb'].get('OldImage', {})
-
-        has_new_dropoff = 'dropoff_datetime' in new_image
-        had_old_dropoff = 'dropoff_datetime' in old_image
-
-        logger.info(f"New image has dropoff_datetime: {has_new_dropoff}, Old image had dropoff_datetime: {had_old_dropoff}")
-
-        # Only process if dropoff_datetime just appeared (trip completion)
-        if not has_new_dropoff or had_old_dropoff:
-            logger.info("Skipping record as it does not represent a new trip completion")
+        if not new_image:
             continue
 
-        # Extract trip_date from the new image
-        trip_date = new_image.get('trip_date', {}).get('S')
+        # Only process records where trip_completed = true
+        trip_completed = new_image.get('trip_completed', {}).get('BOOL', False)
+        if not trip_completed:
+            logger.info("Skipping record because trip is not marked as completed")
+            continue
+
+        # Use trip_date_end for completed trips
+        trip_date = new_image.get('trip_date_end', {}).get('S')
         if not trip_date:
-            logger.warning("trip_date attribute missing in new image; skipping record")
+            logger.warning("trip_date_end missing; skipping record")
             continue
 
-        # Extract fare_amount safely
         fare_amount_str = new_image.get('fare_amount', {}).get('N', '0')
         try:
             fare_amount = float(fare_amount_str)
         except ValueError:
-            logger.error(f"Invalid fare_amount value: {fare_amount_str}; skipping record")
+            logger.error(f"Invalid fare_amount value: {fare_amount_str}; skipping")
             continue
 
-        logger.info(f"Updating KPIs for trip_date: {trip_date} with fare_amount: {fare_amount}")
+        logger.info(f"Updating KPIs for completed trip on {trip_date} with fare_amount: {fare_amount}")
 
         try:
             response = kpi_table.update_item(
@@ -74,8 +67,8 @@ def lambda_handler(event, context):
         except Exception as e:
             logger.error(f"Error updating KPI aggregates for {trip_date}: {e}")
 
-    logger.info("Incremental KPI update complete")
+    logger.info("KPI aggregation complete.")
     return {
         'statusCode': 200,
-        'body': json.dumps('Incremental KPI update complete')
+        'body': json.dumps('KPI aggregation complete.')
     }
