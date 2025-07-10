@@ -4,6 +4,7 @@ import logging
 import base64
 from botocore.exceptions import ClientError
 from datetime import datetime
+from decimal import Decimal
 
 # Set up logging
 logger = logging.getLogger()
@@ -94,13 +95,14 @@ def process_trip_event(event_data):
                 "estimated_fare_amount = :estimated_fare_amount, "
                 "last_updated = :last_updated" # Always update last_updated
             )
+            
             expression_values = {
                 ':pickup_location_id': int(event_data['pickup_location_id']),
                 ':dropoff_location_id': int(event_data['dropoff_location_id']),
                 ':vendor_id': int(event_data['vendor_id']),
                 ':pickup_datetime': event_data['pickup_datetime'],
                 ':estimated_dropoff_datetime': event_data['estimated_dropoff_datetime'],
-                ':estimated_fare_amount': float(event_data['estimated_fare_amount']),
+                ':estimated_fare_amount': Decimal(str(event_data['estimated_fare_amount'])),
                 ':last_updated': last_updated
             }
 
@@ -123,17 +125,19 @@ def process_trip_event(event_data):
                 "trip_type = :trip_type, "
                 "last_updated = :last_updated" # Always update last_updated
             )
+            
             expression_values = {
                 ':dropoff_datetime': event_data['dropoff_datetime'],
-                ':rate_code': float(event_data['rate_code']),
-                ':passenger_count': float(event_data['passenger_count']),
-                ':trip_distance': float(event_data['trip_distance']),
-                ':fare_amount': float(event_data['fare_amount']),
-                ':tip_amount': float(event_data['tip_amount']),
-                ':payment_type': float(event_data['payment_type']),
-                ':trip_type': float(event_data['trip_type']),
+                ':rate_code': Decimal(str(event_data['rate_code'])),
+                ':passenger_count': Decimal(str(event_data['passenger_count'])),
+                ':trip_distance': Decimal(str(event_data['trip_distance'])),
+                ':fare_amount': Decimal(str(event_data['fare_amount'])),
+                ':tip_amount': Decimal(str(event_data['tip_amount'])),
+                ':payment_type': Decimal(str(event_data['payment_type'])),
+                ':trip_type': Decimal(str(event_data['trip_type'])),
                 ':last_updated': last_updated
             }
+
         else:
             raise ValueError(f"Event for trip_id {trip_id} does not match trip start or trip end schema. Keys: {event_data.keys()}")
 
