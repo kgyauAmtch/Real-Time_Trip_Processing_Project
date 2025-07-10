@@ -33,11 +33,16 @@ jobs:
         run: |
           echo "## Detecting changes..."
           git fetch origin main
-          CHANGED=$(git diff --name-only ${{ github.event.before }} ${{ github.sha }})
+          if [ "${{ github.event.before }}" = "0000000000000000000000000000000000000000" ]; then
+            # First commit or new branch: compare against empty tree
+            CHANGED=$(git diff --name-only ${{ github.sha }})
+          else
+            CHANGED=$(git diff --name-only ${{ github.event.before }} ${{ github.sha }})
+          fi
           echo "CHANGED FILES:"
           echo "$CHANGED"
           echo "$CHANGED" | grep -q "^lambda/write_streams/" && echo "ingest_lambda_changed=true" >> $GITHUB_OUTPUT
-       
+
 
       - name: Deploy ingest_lambda (if changed)
         if: steps.changes.outputs.ingest_lambda_changed == 'true'
