@@ -27,7 +27,7 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
 
-      - name: Deploy ingest_lambda
+      - name: Deploy ingest lambda
         run: |
           cd lambda/writestream
           mkdir -p package
@@ -37,3 +37,14 @@ jobs:
           aws lambda update-function-code \
             --function-name writestreams \
             --zip-file fileb://../writestream.zip
+
+      - name: Deploy incremental lambda
+        run: |
+          cd lambda/kpi_dynamo
+          mkdir -p package
+          cp incremental.py package/
+          cd package
+          zip -r ../kpi_dynamo.zip .
+          aws lambda update-function-code \
+            --function-name kpi_dynamo \
+            --zip-file fileb://../kpi_dynamo.zip
