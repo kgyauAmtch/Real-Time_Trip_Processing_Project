@@ -18,16 +18,16 @@ table = dynamodb.Table(table_name)
 TRIP_START_COLUMNS = {
     'trip_id': str,
     'pickup_location_id': int,
-    'dropoff_location_id': int, # Estimated dropoff location id
+    'dropoff_location_id': int,  # Estimated dropoff location id
     'vendor_id': int,
     'pickup_datetime': str,
-    'estimated_dropoff_datetime': str, # Estimated dropoff time
+    'estimated_dropoff_datetime': str,  # Estimated dropoff time
     'estimated_fare_amount': float
 }
 
 TRIP_END_COLUMNS = {
     'trip_id': str,
-    'dropoff_datetime': str, # Actual dropoff time
+    'dropoff_datetime': str,  # Actual dropoff time
     'rate_code': float,
     'passenger_count': float,
     'trip_distance': float,
@@ -36,6 +36,7 @@ TRIP_END_COLUMNS = {
     'payment_type': float,
     'trip_type': float
 }
+
 
 def validate_columns(data, required_schema):
     for col, col_type in required_schema.items():
@@ -46,11 +47,10 @@ def validate_columns(data, required_schema):
         if col_type == float:
             try:
                 float(val)
-            except (ValueError, TypeError): # Catch TypeError for non-numeric types
+            except (ValueError, TypeError):
                 raise ValueError(f"Column {col} must be a number, got {type(val).__name__} with value '{val}'")
         elif col_type == int:
             try:
-                # Attempt to convert to float first, then to int, to handle "10.0" as int
                 int(float(val))
             except (ValueError, TypeError):
                 raise ValueError(f"Column {col} must be an integer, got {type(val).__name__} with value '{val}'")
@@ -59,17 +59,22 @@ def validate_columns(data, required_schema):
                 raise ValueError(f"Column {col} must be a string, got {type(val).__name__} with value '{val}'")
     return True
 
+
 def parse_iso8601(dt_str):
     try:
         return datetime.fromisoformat(dt_str)
     except Exception:
         raise ValueError(f"Invalid datetime format: {dt_str}. Expected ISO 8601.")
 
+
+def extract_trip_date(datetime_str):
+    # Extract date portion from ISO8601 datetime string, e.g. "2024-05-25T13:19:00" -> "2024-05-25"
+    if not datetime_str or not isinstance(datetime_str, str):
+        raise ValueError("Invalid datetime string for trip_date extraction.")
+    return datetime_str.split('T')[0]
+
+
 def process_trip_event(event_data):
-    """
-    Process a single trip event (dict), validate and update DynamoDB.
-    Determines if it's a trip start or end event based on key presence.
-    """
     trip_id = event_data.get('trip_id')
     if not trip_id:
         raise ValueError("Missing 'trip_id' in event data.")
@@ -77,15 +82,16 @@ def process_trip_event(event_data):
     logger.info(f"Processing event for trip_id: {trip_id}")
 
     try:
-        # Determine event type based on a distinguishing key
-        # If 'pickup_location_id' is present, it's likely a trip START event
+        # Determine event type based on keys
         if 'pickup_location_id' in event_data and 'dropoff_datetime' not in event_data:
             logger.info(f"Identified as trip START event for trip_id: {trip_id}")
             validate_columns(event_data, TRIP_START_COLUMNS)
 
-            # Use pickup_datetime as last_updated for trip start
+            # Extract trip_date from pickup_datetime
+            trip_date = extract_trip_date(event_data['pickup_datetime'])
+
             last_updated = parse_iso8601(event_data['pickup_datetime']).isoformat()
-            
+
             update_expression = (
                 "SET pickup_location_id = :pickup_location_id, "
                 "dropoff_location_id = :dropoff_location_id, "
@@ -93,9 +99,10 @@ def process_trip_event(event_data):
                 "pickup_datetime = :pickup_datetime, "
                 "estimated_dropoff_datetime = :estimated_dropoff_datetime, "
                 "estimated_fare_amount = :estimated_fare_amount, "
-                "last_updated = :last_updated" # Always update last_updated
+                "trip_date = :trip_date, "
+                "last_updated = :last_updated"
             )
-            
+
             expression_values = {
                 ':pickup_location_id': int(event_data['pickup_location_id']),
                 ':dropoff_location_id': int(event_data['dropoff_location_id']),
@@ -103,15 +110,17 @@ def process_trip_event(event_data):
                 ':pickup_datetime': event_data['pickup_datetime'],
                 ':estimated_dropoff_datetime': event_data['estimated_dropoff_datetime'],
                 ':estimated_fare_amount': Decimal(str(event_data['estimated_fare_amount'])),
+                ':trip_date': trip_date,
                 ':last_updated': last_updated
             }
 
-        # If 'dropoff_datetime' is present, it's likely a trip END event
         elif 'dropoff_datetime' in event_data:
             logger.info(f"Identified as trip END event for trip_id: {trip_id}")
             validate_columns(event_data, TRIP_END_COLUMNS)
 
-            # Use actual dropoff_datetime as last_updated for trip end
+            # Extract trip_date from dropoff_datetime
+            trip_date = extract_trip_date(event_data['dropoff_datetime'])
+
             last_updated = parse_iso8601(event_data['dropoff_datetime']).isoformat()
 
             update_expression = (
@@ -123,9 +132,10 @@ def process_trip_event(event_data):
                 "tip_amount = :tip_amount, "
                 "payment_type = :payment_type, "
                 "trip_type = :trip_type, "
-                "last_updated = :last_updated" # Always update last_updated
+                "trip_date = :trip_date, "
+                "last_updated = :last_updated"
             )
-            
+
             expression_values = {
                 ':dropoff_datetime': event_data['dropoff_datetime'],
                 ':rate_code': Decimal(str(event_data['rate_code'])),
@@ -135,6 +145,7 @@ def process_trip_event(event_data):
                 ':tip_amount': Decimal(str(event_data['tip_amount'])),
                 ':payment_type': Decimal(str(event_data['payment_type'])),
                 ':trip_type': Decimal(str(event_data['trip_type'])),
+                ':trip_date': trip_date,
                 ':last_updated': last_updated
             }
 
@@ -142,9 +153,7 @@ def process_trip_event(event_data):
             raise ValueError(f"Event for trip_id {trip_id} does not match trip start or trip end schema. Keys: {event_data.keys()}")
 
         logger.info(f"Attempting DynamoDB update for trip_id: {trip_id}. Update expression: {update_expression}")
-        
-        # Idempotent upsert with conditional last_updated check
-        # Only update if incoming last_updated is newer than stored last_updated or if no record exists
+
         response = table.update_item(
             Key={'trip_id': trip_id},
             UpdateExpression=update_expression,
@@ -162,13 +171,14 @@ def process_trip_event(event_data):
             return {'trip_id': trip_id, 'status': 'stale_update_ignored'}
         else:
             logger.error(f"DynamoDB ClientError for trip_id {trip_id}: {e}")
-            raise # Re-raise to be caught by the main handler's try-except
+            raise
     except ValueError as ve:
         logger.error(f"Validation or parsing error for trip_id {trip_id}: {ve}")
-        raise # Re-raise to be caught by the main handler's try-except
+        raise
     except Exception as ex:
         logger.error(f"Unexpected error for trip_id {trip_id}: {ex}")
-        raise # Re-raise to be caught by the main handler's try-except
+        raise
+
 
 def lambda_handler(event, context):
     logger.info(f"Received Kinesis event with {len(event.get('Records', []))} records.")
@@ -178,23 +188,20 @@ def lambda_handler(event, context):
 
     for record in event.get('Records', []):
         try:
-            # Kinesis data is base64 encoded
             payload_base64 = record['kinesis']['data']
             payload = base64.b64decode(payload_base64).decode('utf-8')
             logger.info(f"Decoded Kinesis payload: {payload}")
 
             data = json.loads(payload)
-            
-            # Process each trip event
+
             result = process_trip_event(data)
             results.append(result)
         except Exception as e:
-            # Capture error details including the record that caused the issue
             error_details = {
                 'error': str(e),
                 'kinesis_sequence_number': record.get('kinesis', {}).get('sequenceNumber'),
                 'kinesis_partition_key': record.get('kinesis', {}).get('partitionKey'),
-                'payload_sample': payload[:200] if 'payload' in locals() else 'N/A' # Log first 200 chars of payload
+                'payload_sample': payload[:200] if 'payload' in locals() else 'N/A'
             }
             logger.error(f"Error processing Kinesis record: {json.dumps(error_details)}")
             errors.append(error_details)
@@ -207,17 +214,11 @@ def lambda_handler(event, context):
     }
 
     status_code = 200
-    # If there are errors, return a non-200 status code to indicate partial failure
-    # and potentially trigger retries of the whole batch from Kinesis by Lambda.
     if errors:
-        # If your Lambda is configured with ReportBatchItemFailures,
-        # you might return a different structure. For now, this indicates general failure.
-        status_code = 200 # Setting to 200 allows the Lambda to proceed for the batch but logs errors.
-                        # Change to 500 if you want Lambda to retry the *entire* batch.
+        status_code = 200  
 
     logger.info(f"Lambda execution finished. Response: {json.dumps(response_body)}")
     return {
         'statusCode': status_code,
         'body': json.dumps(response_body)
     }
-
