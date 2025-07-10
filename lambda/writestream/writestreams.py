@@ -1,7 +1,12 @@
 import json
 import boto3
+import logging
 from botocore.exceptions import ClientError
 from datetime import datetime
+
+# Set up logging
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
 
 dynamodb = boto3.resource('dynamodb')
 table_name = 'bolt_data'
@@ -31,11 +36,9 @@ TRIP_END_COLUMNS = {
 }
 
 def validate_columns(data, required_schema):
-    # Check presence and type of required fields
     for col, col_type in required_schema.items():
         if col not in data:
             raise ValueError(f"Missing required column: {col}")
-        # Type check with some flexibility for numeric types
         val = data[col]
         if col_type == float:
             try:
@@ -53,21 +56,19 @@ def validate_columns(data, required_schema):
     return True
 
 def parse_iso8601(dt_str):
-    # Parse datetime string to datetime object
     try:
         return datetime.fromisoformat(dt_str)
     except Exception:
         raise ValueError(f"Invalid datetime format: {dt_str}")
 
 def lambda_handler(event, context):
-    # event is expected to be a dict representing either trip start or trip end event
+    logger.info(f"Received event: {json.dumps(event)}")  # Log the incoming event
+
     try:
-        # Validate event type by presence of keys
         if 'dropoff_datetime' in event:
-            # Trip start event
+            logger.info("Processing trip start event")
             validate_columns(event, TRIP_START_COLUMNS)
             trip_id = event['trip_id']
-            # Use dropoff_datetime as last_updated timestamp
             last_updated = parse_iso8601(event['dropoff_datetime']).isoformat()
             update_expression = (
                 "SET dropoff_datetime = :dropoff_datetime, "
@@ -88,7 +89,7 @@ def lambda_handler(event, context):
                 ':last_updated': last_updated
             }
         elif 'pickup_location_id' in event:
-            # Trip end event
+            logger.info("Processing trip end event")
             validate_columns(event, TRIP_END_COLUMNS)
             trip_id = event['trip_id']
             last_updated = parse_iso8601(event['estimated_dropoff_datetime']).isoformat()
@@ -111,8 +112,8 @@ def lambda_handler(event, context):
         else:
             raise ValueError("Event does not match trip start or trip end schema")
 
-        # Idempotent upsert with conditional last_updated check
-        # Only update if incoming last_updated is newer than stored last_updated or if no record exists
+        logger.info(f"Updating DynamoDB for trip_id: {trip_id} with values: {expression_values}")
+
         response = table.update_item(
             Key={'trip_id': trip_id},
             UpdateExpression=update_expression,
@@ -120,6 +121,9 @@ def lambda_handler(event, context):
             ConditionExpression="attribute_not_exists(last_updated) OR last_updated < :last_updated",
             ReturnValues="ALL_NEW"
         )
+
+        logger.info(f"DynamoDB update successful. Updated attributes: {response.get('Attributes', {})}")
+
         return {
             'statusCode': 200,
             'body': json.dumps({
@@ -130,23 +134,25 @@ def lambda_handler(event, context):
 
     except ClientError as e:
         if e.response['Error']['Code'] == 'ConditionalCheckFailedException':
-            # Stale update ignored
+            logger.warning("Stale update ignored due to conditional check failure.")
             return {
                 'statusCode': 200,
                 'body': json.dumps({'message': 'Stale update ignored'})
             }
         else:
-            # Other DynamoDB errors
+            logger.error(f"DynamoDB ClientError: {str(e)}")
             return {
                 'statusCode': 500,
                 'body': json.dumps({'error': str(e)})
             }
     except ValueError as ve:
+        logger.error(f"Validation error: {str(ve)}")
         return {
             'statusCode': 400,
             'body': json.dumps({'error': str(ve)})
         }
     except Exception as ex:
+        logger.error(f"Unexpected error: {str(ex)}")
         return {
             'statusCode': 500,
             'body': json.dumps({'error': str(ex)})
