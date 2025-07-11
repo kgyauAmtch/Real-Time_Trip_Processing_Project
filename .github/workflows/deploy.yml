@@ -39,17 +39,6 @@ jobs:
             --function-name writestreams \
             --zip-file fileb://../writestream.zip
 
-      - name: Deploy incremental lambda
-        run: |
-          cd lambda/kpi_dynamo
-          mkdir -p package
-          cp incremental.py package/
-          cd package
-          zip -r ../kpi_dynamo.zip .
-          aws lambda update-function-code \
-            --function-name incremental_function \
-            --zip-file fileb://../kpi_dynamo.zip
-
 
       - name: Deploy Glue Job Script
         env:  
