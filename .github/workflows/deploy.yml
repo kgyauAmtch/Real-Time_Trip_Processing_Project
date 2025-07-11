@@ -39,7 +39,6 @@ jobs:
             --function-name writestreams \
             --zip-file fileb://../writestream.zip
 
-
       - name: Deploy Glue Job Script
         env:  
           AWS_REGION: ${{ secrets.AWS_REGION }}
@@ -57,23 +56,23 @@ jobs:
             aws glue update-job --job-name $GLUE_JOB_NAME --job-update '{
               "Role": "'"$GLUE_SERVICE_ROLE"'",
               "Command": {
-                "Name": "glueetl",
+                "Name": "pythonshell",
                 "ScriptLocation": "s3://'"${{ secrets.S3_GLUE_SCRIPT_BUCKET }}"'/dailykpi.py",
                 "PythonVersion": "3"
               },
               "DefaultArguments": {
-                "--job-language": "python",
                 "--DYNAMODB_TABLE": "bolt",
                 "--S3_OUTPUT_PATH": "s3://'${{ secrets.S3_GLUE_SCRIPT_BUCKET }}'/kpi_output/"
-              }
+              },
+              "MaxCapacity": 1,
+              "Timeout": 10
             }' --region $AWS_REGION
           else
             echo "Glue job $GLUE_JOB_NAME does not exist. Creating job..."
             aws glue create-job --name "$GLUE_JOB_NAME" --role "$GLUE_SERVICE_ROLE" \
-              --command '{"Name":"glueetl","ScriptLocation":"s3://'${{ secrets.S3_GLUE_SCRIPT_BUCKET }}'/dailykpi.py","PythonVersion":"3"}' \
-              --glue-version "5.0" \
-              --max-capacity 2 \
+              --command '{"Name":"pythonshell","ScriptLocation":"s3://'${{ secrets.S3_GLUE_SCRIPT_BUCKET }}'/dailykpi.py","PythonVersion":"3"}' \
+              --max-capacity 1 \
               --timeout 10 \
-              --default-arguments '{"--job-language":"python","--DYNAMODB_TABLE":"bolt","--S3_OUTPUT_PATH":"s3://'${{ secrets.S3_GLUE_SCRIPT_BUCKET }}'/kpi_output/"}' \
+              --default-arguments '{"--DYNAMODB_TABLE":"bolt","--S3_OUTPUT_PATH":"s3://'${{ secrets.S3_GLUE_SCRIPT_BUCKET }}'/kpi_output/"}' \
               --region "$AWS_REGION"
           fi
