@@ -50,7 +50,7 @@ jobs:
           zip -r dailykpi.zip dailykpi.py
 
           # Upload to S3
-          aws s3 cp dailykpi.zip s3://${{ secrets.S3_GLUE_SCRIPT_BUCKET }}/dailykpi.zip
+          aws s3 cp dailykpi.py s3://${{ secrets.S3_GLUE_SCRIPT_BUCKET }}/dailykpi.py
 
           # Check if Glue job exists
           if aws glue get-job --job-name $GLUE_JOB_NAME --region $AWS_REGION > /dev/null 2>&1; then
@@ -71,7 +71,7 @@ jobs:
           else
             echo "Glue job $GLUE_JOB_NAME does not exist. Creating job..."
             aws glue create-job --name $GLUE_JOB_NAME --role $GLUE_SERVICE_ROLE \
-              --command Name=glueetl,ScriptLocation=s3://${{ secrets.S3_GLUE_SCRIPT_BUCKET }}/dailykpi.zip,PythonVersion=3 \
+              --command Name=glueetl,ScriptLocation=s3://${{ secrets.S3_GLUE_SCRIPT_BUCKET }}/dailykpi.py,PythonVersion=3 \
               --default-arguments '{"--job-language":"python",
                 "--DYNAMODB_TABLE": "bolt",
                 "--S3_OUTPUT_PATH": "s3://${{ secrets.S3_GLUE_SCRIPT_BUCKET }}/kpi_output/"}' \
