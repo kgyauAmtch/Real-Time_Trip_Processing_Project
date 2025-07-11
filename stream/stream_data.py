@@ -17,54 +17,55 @@ kinesis_client = boto3.client('kinesis', region_name=REGION)
 def load_csv(file_path):
     return pd.read_csv(file_path)
 
-def interleave_rows(df1, df2):
-    # Interleave rows from two dataframes based on index
-    max_len = max(len(df1), len(df2))
-    rows = []
-    for i in range(max_len):
-        if i < len(df1):
-            rows.append(('start', df1.iloc[i].to_dict()))
-        if i < len(df2):
-            rows.append(('end', df2.iloc[i].to_dict()))
-    return rows
-
-def send_record_to_kinesis(record_type, record_data):
-    # Add a field to distinguish event type
-    record_data['event_type'] = record_type
-
-    # Convert to JSON string
-    data_str = json.dumps(record_data)
-
-    # Use trip_id as partition key for ordering
-    partition_key = record_data.get('trip_id')
-    if not partition_key:
-        partition_key = 'unknown'
-
-    response = kinesis_client.put_record(
-        StreamName=STREAM_NAME,
-        Data=data_str.encode('utf-8'),
-        PartitionKey=partition_key
+def send_batch_to_kinesis(records):
+    # records: list of dicts with keys: Data (bytes), PartitionKey (str)
+    response = kinesis_client.put_records(
+        Records=records,
+        StreamName=STREAM_NAME
     )
+    failed_count = response['FailedRecordCount']
+    if failed_count > 0:
+        print(f"Warning: {failed_count} records failed to put in this batch.")
     return response
 
+def stream_records_in_batches(df, record_type, batch_size=200, limit=None, delay=0.1):
+    n = min(limit, len(df)) if limit else len(df)
+    sampled_df = df.sample(n=n, random_state=42).reset_index(drop=True)
+
+    batch = []
+    for i, record in sampled_df.iterrows():
+        data = record.to_dict()
+        data['event_type'] = record_type
+        data_str = json.dumps(data)
+        partition_key = data.get('trip_id') or 'unknown'
+
+        batch.append({
+            'Data': data_str.encode('utf-8'),
+            'PartitionKey': partition_key
+        })
+
+        # When batch is full or last record, send batch
+        if len(batch) == batch_size or i == n - 1:
+            try:
+                resp = send_batch_to_kinesis(batch)
+                print(f"✓ Sent batch of {len(batch)} {record_type} records.")
+            except Exception as e:
+                print(f"Error sending batch of {record_type} records: {e}")
+            batch = []
+            time.sleep(delay)
+
 def main():
-    # Load CSV files
     trip_start_df = load_csv(TRIP_START_CSV)
     trip_end_df = load_csv(TRIP_END_CSV)
 
-    # Interleave rows
-    interleaved = interleave_rows(trip_start_df, trip_end_df)
+    print(f"Streaming {len(trip_start_df)} trip_start events in batches...")
+    stream_records_in_batches(trip_start_df, 'start', batch_size=100, delay=0.05)
 
-    print(f"Streaming {len(interleaved)} records to Kinesis stream '{STREAM_NAME}'...")
+    print("Waiting before sending trip_end events...")
+    time.sleep(2)
 
-    # Stream records with a small delay to simulate real-time
-    for event_type, record in interleaved:
-        try:
-            resp = send_record_to_kinesis(event_type, record)
-            print(f"Sent {event_type} event for trip_id={record.get('trip_id')} to shard {resp['ShardId']}")
-        except Exception as e:
-            print(f"Error sending record: {e}")
-        time.sleep(5)  # Adjust delay as needed
+    print(f"Streaming {len(trip_end_df)} trip_end events in batches...")
+    stream_records_in_batches(trip_end_df, 'end', batch_size=100, delay=0.05)
 
     print("Streaming complete.")
 
