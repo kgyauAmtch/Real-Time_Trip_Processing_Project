@@ -1,67 +1,102 @@
 import sys
-from awsglue.transforms import *
+import boto3
+import json
+from collections import defaultdict
+from decimal import Decimal
 from awsglue.utils import getResolvedOptions
-from pyspark.context import SparkContext
-from awsglue.context import GlueContext
-from awsglue.job import Job
-from pyspark.sql.functions import col, sum as _sum, count as _count, min as _min, max as _max, round as _round
 
-# Parameters passed to the Glue job
-args = getResolvedOptions(sys.argv, ['JOB_NAME', 'DYNAMODB_TABLE', 'S3_OUTPUT_PATH'])
+# Parse Glue job parameters
+args = getResolvedOptions(sys.argv, ['DYNAMODB_TABLE', 'S3_OUTPUT_PATH'])
 
-sc = SparkContext()
-glueContext = GlueContext(sc)
-spark = glueContext.spark_session
-job = Job(glueContext)
-job.init(args['JOB_NAME'], args)
+dynamodb = boto3.resource('dynamodb')
+table = dynamodb.Table(args['DYNAMODB_TABLE'])
 
-dynamodb_table = args['DYNAMODB_TABLE']  
-s3_output_path = args['S3_OUTPUT_PATH']  
+s3 = boto3.client('s3')
 
-# Read from DynamoDB table using Glue catalog or via the DynamoDB connector
-# Option 1: If you have Glue Catalog table for DynamoDB:
-# dyf = glueContext.create_dynamic_frame.from_catalog(database="your_db", table_name="your_table")
+def scan_all_items(table):
+    items = []
+    response = table.scan()
+    items.extend(response.get('Items', []))
+    while 'LastEvaluatedKey' in response:
+        response = table.scan(ExclusiveStartKey=response['LastEvaluatedKey'])
+        items.extend(response.get('Items', []))
+    return items
 
-# Option 2: Read directly from DynamoDB using spark.read.format (requires DynamoDB connector)
-df = spark.read \
-    .format("dynamodb") \
-    .option("tableName", dynamodb_table) \
-    .option("region", "eu-north-1") \
-    .load()
+def calculate_kpis(items):
+    kpis = defaultdict(lambda: {
+        'count_trips': 0,
+        'total_fare': Decimal('0'),
+        'min_fare': None,
+        'max_fare': None
+    })
 
-# Filter only completed trips (assuming trip_completed is boolean)
-df_filtered = df.filter(col("trip_completed") == True)
+    for item in items:
+        if not item.get('trip_completed', False):
+            continue
+        trip_date = item.get('trip_date')
+        fare_amount = item.get('fare_amount')
+        if trip_date is None or fare_amount is None:
+            continue
 
-# Select relevant columns and cast fare_amount to float/decimal
-df_selected = df_filtered.select(
-    col("trip_date").alias("trip_date"),
-    col("fare_amount").cast("double").alias("fare_amount")
-).filter(col("trip_date").isNotNull() & col("fare_amount").isNotNull())
+        fare = Decimal(str(fare_amount))
+        kpi = kpis[trip_date]
+        kpi['count_trips'] += 1
+        kpi['total_fare'] += fare
+        if kpi['min_fare'] is None or fare < kpi['min_fare']:
+            kpi['min_fare'] = fare
+        if kpi['max_fare'] is None or fare > kpi['max_fare']:
+            kpi['max_fare'] = fare
 
-# Aggregate KPIs per trip_date
-kpi_df = df_selected.groupBy("trip_date").agg(
-    _count("fare_amount").alias("count_trips"),
-    _sum("fare_amount").alias("total_fare"),
-    _min("fare_amount").alias("min_fare"),
-    _max("fare_amount").alias("max_fare")
-)
+    # Calculate averages
+    for date, kpi in kpis.items():
+        count = kpi['count_trips']
+        kpi['average_fare'] = (kpi['total_fare'] / count).quantize(Decimal('0.01')) if count > 0 else Decimal('0.00')
+        kpi['total_fare'] = kpi['total_fare'].quantize(Decimal('0.01'))
+        kpi['min_fare'] = kpi['min_fare'].quantize(Decimal('0.01')) if kpi['min_fare'] is not None else None
+        kpi['max_fare'] = kpi['max_fare'].quantize(Decimal('0.01')) if kpi['max_fare'] is not None else None
 
-# Calculate average fare
-kpi_df = kpi_df.withColumn("average_fare", _round(col("total_fare") / col("count_trips"), 2)) \
-               .withColumn("total_fare", _round(col("total_fare"), 2)) \
-               .withColumn("min_fare", _round(col("min_fare"), 2)) \
-               .withColumn("max_fare", _round(col("max_fare"), 2))
+    return kpis
 
-# Write KPIs partitioned by year/month/day extracted from trip_date
-from pyspark.sql.functions import year, month, dayofmonth
+def write_kpi_to_s3(s3_path, trip_date, kpi):
+    bucket = s3_path.replace("s3://", "").split('/')[0]
+    prefix = '/'.join(s3_path.replace("s3://", "").split('/')[1:]).rstrip('/')
+    s3_key = f"{prefix}/date={trip_date}/kpi.json"
 
-kpi_df = kpi_df.withColumn("year", year(col("trip_date"))) \
-               .withColumn("month", month(col("trip_date"))) \
-               .withColumn("day", dayofmonth(col("trip_date")))
+    kpi_json = json.dumps({
+        'date': trip_date,
+        'count_trips': kpi['count_trips'],
+        'total_fare': float(kpi['total_fare']),
+        'min_fare': float(kpi['min_fare']) if kpi['min_fare'] is not None else None,
+        'max_fare': float(kpi['max_fare']) if kpi['max_fare'] is not None else None,
+        'average_fare': float(kpi['average_fare'])
+    }, indent=2)
 
-# Write to S3 as Parquet or JSON (Parquet recommended for analytics)
-kpi_df.write.mode("overwrite") \
-    .partitionBy("year", "month", "day") \
-    .parquet(s3_output_path)
+    s3.put_object(
+        Bucket=bucket,
+        Key=s3_key,
+        Body=kpi_json,
+        ContentType='application/json'
+    )
+    print(f"Wrote KPIs for {trip_date} to s3://{bucket}/{s3_key}")
 
-job.commit()
+def main():
+    print(f"Starting KPI calculation for DynamoDB table: {args['DYNAMODB_TABLE']}")
+    items = scan_all_items(table)
+    print(f"Scanned {len(items)} items from DynamoDB")
+
+    kpis = calculate_kpis(items)
+    print(f"Calculated KPIs for {len(kpis)} dates")
+
+    for trip_date, kpi in sorted(kpis.items()):
+        print(f"Date: {trip_date}")
+        print(f"  Count Trips: {kpi['count_trips']}")
+        print(f"  Total Fare: {kpi['total_fare']}")
+        print(f"  Min Fare: {kpi['min_fare']}")
+        print(f"  Max Fare: {kpi['max_fare']}")
+        print(f"  Average Fare: {kpi['average_fare']}")
+        print()
+
+        write_kpi_to_s3(args['S3_OUTPUT_PATH'], trip_date, kpi)
+
+if __name__ == "__main__":
+    main()
