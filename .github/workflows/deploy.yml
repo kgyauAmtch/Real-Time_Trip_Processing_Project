@@ -42,38 +42,38 @@ jobs:
 
       - name: Deploy Glue Job Script
         env:  
+          AWS_REGION: ${{ secrets.AWS_REGION }}
           GLUE_JOB_NAME: dailykpi                     
           GLUE_SERVICE_ROLE: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/glue4dynamoread  
-        run: |
-          # Zip the Glue job script
-          cd gluejob
-          zip -r dailykpi.zip dailykpi.py
+          run: |
+            cd gluejob
 
-          # Upload to S3
-          aws s3 cp dailykpi.py s3://${{ secrets.S3_GLUE_SCRIPT_BUCKET }}/dailykpi.py
+            # Upload the Python script directly (no zip)
+            aws s3 cp dailykpi.py s3://${{ secrets.S3_GLUE_SCRIPT_BUCKET }}/dailykpi.py
 
-          # Check if Glue job exists
-          if aws glue get-job --job-name $GLUE_JOB_NAME --region $AWS_REGION > /dev/null 2>&1; then
-            echo "Glue job $GLUE_JOB_NAME exists. Updating job..."
-            aws glue update-job --job-name $GLUE_JOB_NAME --job-update '{
-              "Role": "'"$GLUE_SERVICE_ROLE"'",
-              "Command": {
-                "Name": "glueetl",
-                "ScriptLocation": "s3://'"${{ secrets.S3_GLUE_SCRIPT_BUCKET }}"'/dailykpi.zip",
-                "PythonVersion": "3"
-              },
-              "DefaultArguments": {
-                "--job-language": "python",
-                "--DYNAMODB_TABLE": "bolt",
-                "--S3_OUTPUT_PATH": "s3://${{ secrets.S3_GLUE_SCRIPT_BUCKET }}/kpi_output/"
-              }
-            }' --region $AWS_REGION
-          else
-            echo "Glue job $GLUE_JOB_NAME does not exist. Creating job..."
-            aws glue create-job --name $GLUE_JOB_NAME --role $GLUE_SERVICE_ROLE \
-              --command Name=glueetl,ScriptLocation=s3://${{ secrets.S3_GLUE_SCRIPT_BUCKET }}/dailykpi.py,PythonVersion=3 \
-              --default-arguments '{"--job-language":"python",
-                "--DYNAMODB_TABLE": "bolt",
-                "--S3_OUTPUT_PATH": "s3://${{ secrets.S3_GLUE_SCRIPT_BUCKET }}/kpi_output/"}' \
-              --region ${{ secrets.AWS_REGION }}
-          fi
+            # Check if Glue job exists
+            if aws glue get-job --job-name $GLUE_JOB_NAME --region $AWS_REGION > /dev/null 2>&1; then
+              echo "Glue job $GLUE_JOB_NAME exists. Updating job..."
+              aws glue update-job --job-name $GLUE_JOB_NAME --job-update '{
+                "Role": "'"$GLUE_SERVICE_ROLE"'",
+                "Command": {
+                  "Name": "glueetl",
+                  "ScriptLocation": "s3://'"${{ secrets.S3_GLUE_SCRIPT_BUCKET }}"'/dailykpi.py",
+                  "PythonVersion": "3"
+                },
+                "DefaultArguments": {
+                  "--job-language": "python",
+                  "--DYNAMODB_TABLE": "bolt",
+                  "--S3_OUTPUT_PATH": "s3://'${{ secrets.S3_GLUE_SCRIPT_BUCKET }}'/kpi_output/"
+                }
+              }' --region $AWS_REGION
+            else
+              echo "Glue job $GLUE_JOB_NAME does not exist. Creating job..."
+              aws glue create-job --name "$GLUE_JOB_NAME" --role "$GLUE_SERVICE_ROLE" \
+                --command '{"Name":"glueetl","ScriptLocation":"s3://'${{ secrets.S3_GLUE_SCRIPT_BUCKET }}'/dailykpi.py","PythonVersion":"3"}' \
+                --glue-version "5.0" \
+                --max-capacity 2 \
+                --timeout 10 \
+                --default-arguments '{"--job-language":"python","--DYNAMODB_TABLE":"bolt","--S3_OUTPUT_PATH":"s3://'${{ secrets.S3_GLUE_SCRIPT_BUCKET }}'/kpi_output/"}' \
+                --region "$AWS_REGION"
+            fi
