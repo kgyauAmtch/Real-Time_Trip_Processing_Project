@@ -11,9 +11,10 @@ logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
 dynamodb = boto3.resource('dynamodb')
-table_name = 'bolt_data'
+table_name = 'bolt'
 table = dynamodb.Table(table_name)
 
+# Required columns for validation
 TRIP_START_COLUMNS = {
     'trip_id': str,
     'pickup_location_id': int,
@@ -36,7 +37,6 @@ TRIP_END_COLUMNS = {
     'trip_type': float
 }
 
-
 def validate_columns(data, required_schema):
     for col, col_type in required_schema.items():
         if col not in data:
@@ -57,16 +57,26 @@ def validate_columns(data, required_schema):
                 raise ValueError(f"Column {col} must be a string, got {type(val).__name__}")
     return True
 
-
 def parse_iso8601(dt_str):
-    return datetime.fromisoformat(dt_str)
+    # Support both 'YYYY-MM-DDTHH:MM:SS' and 'YYYY-MM-DD HH:MM:SS' formats
+    try:
+        return datetime.fromisoformat(dt_str)
+    except ValueError:
+        # Try replacing space with 'T' if needed
+        try:
+            return datetime.fromisoformat(dt_str.replace(' ', 'T'))
+        except Exception:
+            raise ValueError(f"Invalid datetime format: {dt_str}. Expected ISO 8601.")
 
-
-def extract_trip_date(datetime_str):
+def extract_date_from_datetime_string(datetime_str):
+    """
+    Extracts the date part (YYYY-MM-DD) from a datetime string.
+    Supports both 'YYYY-MM-DD HH:MM:SS' and 'YYYY-MM-DDTHH:MM:SS' formats.
+    """
     if not datetime_str or not isinstance(datetime_str, str):
-        raise ValueError("Invalid datetime string for trip_date extraction.")
-    return datetime_str.split('T')[0]
-
+        raise ValueError("Invalid datetime string for date extraction.")
+    # Extract date part before space or 'T'
+    return datetime_str.split(' ')[0].split('T')[0]
 
 def process_trip_event(event_data):
     trip_id = event_data.get('trip_id')
@@ -76,20 +86,22 @@ def process_trip_event(event_data):
     logger.info(f"Processing event for trip_id: {trip_id}")
     try:
         expression_values = {}
+        # is_start_event: has pickup_location_id but no dropoff_datetime (yet)
         is_start_event = 'pickup_location_id' in event_data and 'dropoff_datetime' not in event_data
+        # is_end_event: has dropoff_datetime
         is_end_event = 'dropoff_datetime' in event_data
 
         update_expression_parts = []
         update_expression = "SET "
-        last_updated = None
+        last_updated = None # This will be the timestamp for the current event's processing
 
         if is_start_event:
             logger.info(f"Identified as trip START event for trip_id: {trip_id}")
             validate_columns(event_data, TRIP_START_COLUMNS)
 
+            # Use pickup_datetime as last_updated for trip start
             last_updated = parse_iso8601(event_data['pickup_datetime']).isoformat()
-            trip_date_start = extract_trip_date(event_data['pickup_datetime'])
-
+            
             expression_values.update({
                 ':pickup_location_id': int(event_data['pickup_location_id']),
                 ':dropoff_location_id': int(event_data['dropoff_location_id']),
@@ -97,7 +109,6 @@ def process_trip_event(event_data):
                 ':pickup_datetime': event_data['pickup_datetime'],
                 ':estimated_dropoff_datetime': event_data['estimated_dropoff_datetime'],
                 ':estimated_fare_amount': Decimal(str(event_data['estimated_fare_amount'])),
-                ':trip_date_start': trip_date_start,
                 ':last_updated': last_updated
             })
 
@@ -108,7 +119,6 @@ def process_trip_event(event_data):
                 "pickup_datetime = :pickup_datetime",
                 "estimated_dropoff_datetime = :estimated_dropoff_datetime",
                 "estimated_fare_amount = :estimated_fare_amount",
-                "trip_date_start = :trip_date_start",
                 "last_updated = :last_updated"
             ])
 
@@ -116,8 +126,11 @@ def process_trip_event(event_data):
             logger.info(f"Identified as trip END event for trip_id: {trip_id}")
             validate_columns(event_data, TRIP_END_COLUMNS)
 
+            # Use dropoff_datetime as last_updated for trip end
             last_updated = parse_iso8601(event_data['dropoff_datetime']).isoformat()
-            trip_date_end = extract_trip_date(event_data['dropoff_datetime'])
+            
+            # Extract and assign trip_date from dropoff_datetime
+            trip_date = extract_date_from_datetime_string(event_data['dropoff_datetime'])
 
             expression_values.update({
                 ':dropoff_datetime': event_data['dropoff_datetime'],
@@ -128,7 +141,7 @@ def process_trip_event(event_data):
                 ':tip_amount': Decimal(str(event_data['tip_amount'])),
                 ':payment_type': Decimal(str(event_data['payment_type'])),
                 ':trip_type': Decimal(str(event_data['trip_type'])),
-                ':trip_date_end': trip_date_end,
+                ':trip_date': trip_date, # This is the key change: storing as 'trip_date'
                 ':last_updated': last_updated
             })
 
@@ -141,17 +154,16 @@ def process_trip_event(event_data):
                 "tip_amount = :tip_amount",
                 "payment_type = :payment_type",
                 "trip_type = :trip_type",
-                "trip_date_end = :trip_date_end",
+                "trip_date = :trip_date", # This is the key change: updating 'trip_date'
                 "last_updated = :last_updated"
             ])
 
         else:
             raise ValueError(f"Event for trip_id {trip_id} does not match expected schemas.")
 
-        # Finalize update expression
         update_expression += ", ".join(update_expression_parts)
 
-        # Perform the update
+        # Perform the update with conditional check on last_updated
         response = table.update_item(
             Key={'trip_id': trip_id},
             UpdateExpression=update_expression,
@@ -161,9 +173,8 @@ def process_trip_event(event_data):
         )
 
         updated_attributes = response.get('Attributes', {})
-        logger.info(f"Update succeeded. Checking for trip completion for trip_id: {trip_id}")
 
-        # Determine if trip is now complete
+        # Mark trip as completed if both pickup and dropoff datetime exist
         if updated_attributes.get('pickup_datetime') and updated_attributes.get('dropoff_datetime'):
             table.update_item(
                 Key={'trip_id': trip_id},
@@ -185,7 +196,6 @@ def process_trip_event(event_data):
     except Exception as ex:
         logger.error(f"Error processing trip_id {trip_id}: {ex}")
         raise
-
 
 def lambda_handler(event, context):
     logger.info(f"Received Kinesis event with {len(event.get('Records', []))} records.")
