@@ -5,6 +5,7 @@ import base64
 from botocore.exceptions import ClientError
 from datetime import datetime
 from decimal import Decimal
+import math
 
 # Set up logging
 logger = logging.getLogger()
@@ -13,6 +14,10 @@ logger.setLevel(logging.INFO)
 dynamodb = boto3.resource('dynamodb')
 table_name = 'bolt'
 table = dynamodb.Table(table_name)
+
+# S3 setup for rejected rows
+s3 = boto3.client('s3')
+REJECTED_BUCKET = 'your-rejected-records-bucket'  
 
 # Required columns for validation
 TRIP_START_COLUMNS = {
@@ -36,6 +41,21 @@ TRIP_END_COLUMNS = {
     'payment_type': float,
     'trip_type': float
 }
+
+def sanitize_numeric_value(val):
+    """
+    Converts val to Decimal if valid number.
+    Returns None if val is NaN or Infinity.
+    Raises ValueError if val cannot be converted to float.
+    """
+    try:
+        fval = float(val)
+        if math.isnan(fval) or math.isinf(fval):
+            logger.warning(f"Numeric value {val} is NaN or Infinity, replacing with None")
+            return None
+        return Decimal(str(fval))
+    except (ValueError, TypeError) as e:
+        raise ValueError(f"Invalid numeric value: {val} ({e})")
 
 def validate_columns(data, required_schema):
     for col, col_type in required_schema.items():
@@ -108,7 +128,7 @@ def process_trip_event(event_data):
                 ':vendor_id': int(event_data['vendor_id']),
                 ':pickup_datetime': event_data['pickup_datetime'],
                 ':estimated_dropoff_datetime': event_data['estimated_dropoff_datetime'],
-                ':estimated_fare_amount': Decimal(str(event_data['estimated_fare_amount'])),
+                ':estimated_fare_amount': sanitize_numeric_value(event_data['estimated_fare_amount']),
                 ':last_updated': last_updated
             })
 
@@ -134,13 +154,13 @@ def process_trip_event(event_data):
 
             expression_values.update({
                 ':dropoff_datetime': event_data['dropoff_datetime'],
-                ':rate_code': Decimal(str(event_data['rate_code'])),
-                ':passenger_count': Decimal(str(event_data['passenger_count'])),
-                ':trip_distance': Decimal(str(event_data['trip_distance'])),
-                ':fare_amount': Decimal(str(event_data['fare_amount'])),
-                ':tip_amount': Decimal(str(event_data['tip_amount'])),
-                ':payment_type': Decimal(str(event_data['payment_type'])),
-                ':trip_type': Decimal(str(event_data['trip_type'])),
+                ':rate_code': sanitize_numeric_value(event_data['rate_code']),
+                ':passenger_count': sanitize_numeric_value(event_data['passenger_count']),
+                ':trip_distance': sanitize_numeric_value(event_data['trip_distance']),
+                ':fare_amount': sanitize_numeric_value(event_data['fare_amount']),
+                ':tip_amount': sanitize_numeric_value(event_data['tip_amount']),
+                ':payment_type': sanitize_numeric_value(event_data['payment_type']),
+                ':trip_type': sanitize_numeric_value(event_data['trip_type']),
                 ':trip_date': trip_date, # This is the key change: storing as 'trip_date'
                 ':last_updated': last_updated
             })
@@ -202,8 +222,10 @@ def lambda_handler(event, context):
 
     results = []
     errors = []
+    rejected_records = []
 
     for record in event.get('Records', []):
+        payload = None
         try:
             payload_base64 = record['kinesis']['data']
             payload = base64.b64decode(payload_base64).decode('utf-8')
@@ -217,10 +239,30 @@ def lambda_handler(event, context):
                 'error': str(e),
                 'kinesis_sequence_number': record.get('kinesis', {}).get('sequenceNumber'),
                 'kinesis_partition_key': record.get('kinesis', {}).get('partitionKey'),
-                'payload_sample': payload[:200] if 'payload' in locals() else 'N/A'
+                'payload_sample': payload[:200] if payload else 'N/A'
             }
             logger.error(f"Error processing record: {json.dumps(error_details)}")
             errors.append(error_details)
+            # Add the full payload and error for S3
+            rejected_records.append({
+                'error': str(e),
+                'kinesis_sequence_number': record.get('kinesis', {}).get('sequenceNumber'),
+                'kinesis_partition_key': record.get('kinesis', {}).get('partitionKey'),
+                'payload': payload if payload else 'N/A'
+            })
+
+    # Write all rejected records to S3 as a single JSON file, if any
+    if rejected_records:
+        s3_key = f"rejected/rejected_records_{datetime.utcnow().strftime('%Y%m%dT%H%M%S')}.json"
+        try:
+            s3.put_object(
+                Bucket=REJECTED_BUCKET,
+                Key=s3_key,
+                Body=json.dumps(rejected_records, indent=2).encode('utf-8')
+            )
+            logger.info(f"Wrote {len(rejected_records)} rejected records to s3://{REJECTED_BUCKET}/{s3_key}")
+        except Exception as s3e:
+            logger.error(f"Failed to write rejected records to S3: {s3e}")
 
     return {
         'statusCode': 200,
